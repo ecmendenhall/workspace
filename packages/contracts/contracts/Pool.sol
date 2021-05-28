@@ -9,6 +9,8 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
+import "hardhat/console.sol";
+
 interface YearnVault is IERC20 {
   function token() external view returns (address);
 
@@ -90,9 +92,11 @@ contract Pool is ERC20, Ownable, ReentrancyGuard {
   }
 
   function deposit(uint256 amount) external nonReentrant returns (uint256) {
+    console.log ("deposit/before fees : ", pricePerPoolToken());
     _takeFees();
 
-    uint256 poolTokens = _issuePoolTokens(msg.sender, amount);
+    console.log ("deposit/after fees : ", pricePerPoolToken());
+    uint256 poolTokens = _issuePoolTokensForAmount(msg.sender, amount);
     emit Deposit(msg.sender, amount, poolTokens);
 
     dai.safeTransferFrom(msg.sender, address(this), amount);
@@ -100,15 +104,17 @@ contract Pool is ERC20, Ownable, ReentrancyGuard {
     _sendToYearn(crvLPTokenAmount);
 
     _reportPoolTokenHWM();
-
+    console.log ("deposit/after transfers: ", pricePerPoolToken());
     return balanceOf(msg.sender);
   }
 
   function withdraw(uint256 amount) external nonReentrant returns (uint256, uint256) {
     require(amount <= balanceOf(msg.sender), "Insufficient pool token balance");
 
+    console.log ("withdraw/before fees: ", pricePerPoolToken());
     _takeFees();
 
+    console.log ("withdraw/after fees: ", pricePerPoolToken());
     uint256 daiAmount = _withdrawPoolTokens(msg.sender, amount);
     uint256 fee = _calculateWithdrawalFee(daiAmount);
     uint256 withdrawal = daiAmount.sub(fee);
@@ -116,6 +122,7 @@ contract Pool is ERC20, Ownable, ReentrancyGuard {
     _transferWithdrawalFee(fee);
     _transferWithdrawal(withdrawal);
 
+    console.log ("withdraw/after transfers: ", pricePerPoolToken());
     _reportPoolTokenHWM();
 
 
@@ -165,8 +172,7 @@ contract Pool is ERC20, Ownable, ReentrancyGuard {
   function valueFor(uint256 poolTokens) public view returns (uint256) {
     uint256 yvShares = _yearnSharesFor(poolTokens);
     uint256 shareValue = _yearnShareValue(yvShares);
-    uint256 fee = _calculateWithdrawalFee(shareValue);
-    return shareValue.sub(fee);
+    return shareValue;
   }
 
 
@@ -181,9 +187,16 @@ contract Pool is ERC20, Ownable, ReentrancyGuard {
     }
   }
 
-  function _issueTokensForFeeAmount(uint256 amount) internal {
-    uint256 tokens = amount.mul(pricePerPoolToken()).div(1e18);
-    _issuePoolTokens(address(this), tokens);
+  function _issuePoolTokensForAmount(address to, uint256 amount) internal returns (uint256) {
+    uint256 tokens = 0;
+    if (totalSupply() >0 ) {
+      tokens = amount.mul(1e18).div(pricePerPoolToken()).mul(1e18).div(1e18);
+    } else {
+      tokens = amount;
+    }
+    console.log ("total supply : ", totalSupply());
+    console.log ("tokens issued : ", tokens); 
+    return _issuePoolTokens(to, tokens);
   }
 
   function _takeManagementFee() internal {
@@ -193,7 +206,7 @@ contract Pool is ERC20, Ownable, ReentrancyGuard {
         SECONDS_PER_YEAR.mul(BPS_DENOMINATOR)
       );
       if (fee > 0) {
-        _issueTokensForFeeAmount(fee);
+        _issuePoolTokensForAmount(address(this), fee);
         emit ManagementFee(fee);
       }
   }
@@ -207,7 +220,7 @@ contract Pool is ERC20, Ownable, ReentrancyGuard {
           .mul(totalSupply())
           .div(BPS_DENOMINATOR)
           .div(1e18);
-      _issueTokensForFeeAmount(fee);
+      _issuePoolTokensForAmount(address(this), fee);
       emit PerformanceFee(fee);
     }
   }
