@@ -21,6 +21,27 @@ interface YearnVault is IERC20 {
   function getPricePerFullShare() external view returns (uint256);
 }
 
+interface CurveAddressProvider {
+  function get_registry()
+    external
+    view
+    returns (address);
+}
+
+interface CurveRegistry {
+  function get_pool_from_lp_token(address lp_token)
+    external
+    view
+    returns (address);
+}
+
+interface CurveMetapool {
+  function get_virtual_price()
+    external
+    view
+    returns (uint256);
+}
+
 interface CurveDepositZap {
   function add_liquidity(uint256[4] calldata amounts, uint256 min_mint_amounts)
     external
@@ -38,6 +59,7 @@ interface CurveDepositZap {
     returns (uint256);
 }
 
+
 interface DAI is IERC20 {}
 
 interface CrvLPToken is IERC20 {}
@@ -51,6 +73,9 @@ contract Pool is ERC20, Ownable, ReentrancyGuard {
   DAI public dai;
   CrvLPToken public crvLPToken;
   YearnVault public yearnVault;
+  CurveAddressProvider public curveAddressProvider;
+  CurveRegistry public curveRegistry;
+  CurveMetapool public curveMetapool;
   CurveDepositZap public curveDepositZap;
   address public rewardsManager;
 
@@ -75,27 +100,30 @@ contract Pool is ERC20, Ownable, ReentrancyGuard {
   constructor(
     address dai_,
     address yearnVault_,
+    address curveAddressProvider_,
     address curveDepositZap_,
     address rewardsManager_
   ) ERC20("Popcorn DAI Pool", "popDAI") {
     require(address(dai_) != address(0));
     require(address(yearnVault_) != address(0));
+    require(address(curveAddressProvider_) != address(0));
     require(address(curveDepositZap_) != address(0));
     require(rewardsManager_ != address(0));
 
     dai = DAI(dai_);
     yearnVault = YearnVault(yearnVault_);
     crvLPToken = CrvLPToken(yearnVault.token());
+    curveAddressProvider = CurveAddressProvider(curveAddressProvider_);
+    curveRegistry = CurveRegistry(curveAddressProvider.get_registry());
+    curveMetapool = CurveMetapool(curveRegistry.get_pool_from_lp_token(address(crvLPToken)));
     curveDepositZap = CurveDepositZap(curveDepositZap_);
     rewardsManager = rewardsManager_;
     feesUpdatedAt = block.timestamp;
   }
 
   function deposit(uint256 amount) external nonReentrant returns (uint256) {
-    console.log ("deposit/before fees : ", pricePerPoolToken());
     _takeFees();
 
-    console.log ("deposit/after fees : ", pricePerPoolToken());
     uint256 poolTokens = _issuePoolTokensForAmount(msg.sender, amount);
     emit Deposit(msg.sender, amount, poolTokens);
 
@@ -104,17 +132,14 @@ contract Pool is ERC20, Ownable, ReentrancyGuard {
     _sendToYearn(crvLPTokenAmount);
 
     _reportPoolTokenHWM();
-    console.log ("deposit/after transfers: ", pricePerPoolToken());
     return balanceOf(msg.sender);
   }
 
   function withdraw(uint256 amount) external nonReentrant returns (uint256, uint256) {
     require(amount <= balanceOf(msg.sender), "Insufficient pool token balance");
 
-    console.log ("withdraw/before fees: ", pricePerPoolToken());
     _takeFees();
 
-    console.log ("withdraw/after fees: ", pricePerPoolToken());
     uint256 daiAmount = _withdrawPoolTokens(msg.sender, amount);
     uint256 fee = _calculateWithdrawalFee(daiAmount);
     uint256 withdrawal = daiAmount.sub(fee);
@@ -122,7 +147,6 @@ contract Pool is ERC20, Ownable, ReentrancyGuard {
     _transferWithdrawalFee(fee);
     _transferWithdrawal(withdrawal);
 
-    console.log ("withdraw/after transfers: ", pricePerPoolToken());
     _reportPoolTokenHWM();
 
 
@@ -189,13 +213,11 @@ contract Pool is ERC20, Ownable, ReentrancyGuard {
 
   function _issuePoolTokensForAmount(address to, uint256 amount) internal returns (uint256) {
     uint256 tokens = 0;
-    if (totalSupply() >0 ) {
-      tokens = amount.mul(1e18).div(pricePerPoolToken()).mul(1e18).div(1e18);
+    if (totalSupply() > 0) {
+      tokens = amount.mul(1e18).mul(1e18).div(pricePerPoolToken()).div(1e18);
     } else {
       tokens = amount;
     }
-    console.log ("total supply : ", totalSupply());
-    console.log ("tokens issued : ", tokens); 
     return _issuePoolTokens(to, tokens);
   }
 
@@ -346,6 +368,7 @@ contract Pool is ERC20, Ownable, ReentrancyGuard {
   function _yearnShareValue(uint256 yvShares) internal view returns (uint256) {
     uint256 crvLPTokens =
       yearnVault.getPricePerFullShare().mul(yvShares).div(1e18);
-    return curveDepositZap.calc_withdraw_one_coin(crvLPTokens, 1);
+    uint256 virtualPrice = curveMetapool.get_virtual_price();
+    return crvLPTokens.mul(virtualPrice).div(1e18);
   }
 }
